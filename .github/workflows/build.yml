@@ -1,8 +1,8 @@
 name: Build executables
 
-# Compila ImageAnalyzer para Windows y macOS y publica los ejecutables
-# como artefactos descargables. Se ejecuta en cada push a main, en cada
-# tag v* y manualmente desde la pestaña Actions.
+# Compila ImageAnalyzer para Windows y macOS, sube los ejecutables como
+# artefactos y publica una Release descargable. Se ejecuta en cada push a
+# main, en cada tag v* y manualmente desde la pestaña Actions.
 on:
   push:
     branches: [main]
@@ -25,11 +25,11 @@ jobs:
           - os: windows-latest
             icon: assets/logo.ico
             add_data: "assets/logo.png;assets"
-            artifact: ImageAnalyzer-windows
+            artifact: ImageAnalyzer-Windows
           - os: macos-latest
             icon: assets/logo.icns
             add_data: "assets/logo.png:assets"
-            artifact: ImageAnalyzer-macos
+            artifact: ImageAnalyzer-macOS
 
     steps:
       - name: Checkout
@@ -53,8 +53,42 @@ jobs:
           --add-data "${{ matrix.add_data }}"
           main.py
 
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Copy-Item dist/ImageAnalyzer.exe ImageAnalyzer-Windows.exe
+        shell: pwsh
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: cd dist && zip -r ../ImageAnalyzer-macOS.zip ImageAnalyzer.app
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/*
+          path: |
+            ImageAnalyzer-Windows.exe
+            ImageAnalyzer-macOS.zip
+          if-no-files-found: ignore
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Tag rodante "latest" en pushes a main; el propio tag en releases v*.
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Latest build' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          files: artifacts/**
