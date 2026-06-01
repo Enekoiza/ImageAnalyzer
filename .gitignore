@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# App
+ErrorLogs.txt
+
+# OS
+.DS_Store
+Thumbs.db
