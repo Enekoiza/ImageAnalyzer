@@ -1,9 +1,24 @@
 # ImageAnalyzer
 
+[![Build executables](https://github.com/Enekoiza/ImageAnalyzer/actions/workflows/build.yml/badge.svg)](https://github.com/Enekoiza/ImageAnalyzer/actions/workflows/build.yml)
+
 Aplicación de escritorio multiplataforma (Windows y macOS) para **anotar
 imágenes haciendo clic** sobre ellas y registrar puntos de coordenadas.
 Cada punto se mapea a la resolución original de la imagen, se muestra en
 una tabla lateral y puede exportarse a CSV.
+
+## Descargas
+
+Ejecutables listos para usar (última versión compilada automáticamente):
+
+| Sistema | Descarga |
+|---------|----------|
+| **Windows** | [ImageAnalyzer-Windows.exe](https://github.com/Enekoiza/ImageAnalyzer/releases/download/latest/ImageAnalyzer-Windows.exe) |
+| **macOS** | [ImageAnalyzer-macOS.zip](https://github.com/Enekoiza/ImageAnalyzer/releases/download/latest/ImageAnalyzer-macOS.zip) |
+
+> En macOS, la primera vez ábrela con **clic derecho → Abrir** (app sin firmar).
+> Estos enlaces apuntan siempre a la última compilación publicada por CI; si
+> aún no existe, lanza el workflow desde la pestaña **Actions**.
 
 ## Características
 
