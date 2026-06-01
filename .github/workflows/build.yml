@@ -9,6 +9,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Ejecuta las acciones JS con Node.js 24 (evita el aviso de deprecación de
+# Node.js 20 antes de que sea obligatorio).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     name: Build (${{ matrix.os }})
