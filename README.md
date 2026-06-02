@@ -95,6 +95,11 @@ Ejecutables listos para usar (última versión compilada automáticamente):
 - Botón **Export** que permite elegir formato **CSV** o **Excel (.xlsx)** con
   todos los records globales (`id, image, latitude, longitude, status, specie,
   review_later, notes`); avisa si no hay registros.
+- Botón **Load Existing Export File**: carga un fichero de export previo (mismas
+  columnas). La tabla queda vacía pero los nuevos records continúan numerándose
+  tras el último `id` del fichero; el botón **Export** se convierte en **Save to
+  the loaded file**, que añade los records de la tabla **después** de las filas
+  existentes del fichero cargado.
 
 ## Stack
 
