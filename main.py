@@ -49,6 +49,12 @@ from PyQt6.QtWidgets import (
 IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.tif *.tiff)"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 
+# Columnas (y orden) de los ficheros de exportación.
+EXPORT_COLUMNS = [
+    "id", "image", "latitude", "longitude",
+    "status", "specie", "review_later", "notes",
+]
+
 
 def _app_dir() -> Path:
     """Carpeta del ejecutable (empaquetado) o del script (desarrollo)."""
@@ -828,22 +834,40 @@ class MainWindow(QMainWindow):
         clear_btn.clicked.connect(self._clear_images)
 
         self._image_list = QListWidget()
-        self._image_list.setIconSize(QSize(56, 56))
+        self._image_list.setIconSize(QSize(40, 40))
         self._image_list.currentItemChanged.connect(self._on_image_selected)
 
         self._processed_btn = QPushButton("Mark as processed → next")
         self._processed_btn.clicked.connect(self._mark_processed)
 
+        left_header = QHBoxLayout()
+        left_header.addWidget(QLabel("Images to process"))
+        left_header.addStretch()
+        left_collapse = QPushButton("◀")
+        left_collapse.setFixedWidth(28)
+        left_collapse.setToolTip("Collapse panel")
+        left_collapse.clicked.connect(lambda: self._toggle_left(False))
+        left_header.addWidget(left_collapse)
+
         left_layout = QVBoxLayout()
-        left_layout.addWidget(QLabel("Images to process"))
+        left_layout.addLayout(left_header)
         left_layout.addWidget(load_img_btn)
         left_layout.addWidget(load_folder_btn)
         left_layout.addWidget(clear_btn)
         left_layout.addWidget(self._image_list, stretch=1)
-        left_layout.addWidget(self._processed_btn)
-        left_panel = QWidget()
-        left_panel.setLayout(left_layout)
-        left_panel.setFixedWidth(320)
+        self._left_panel = QWidget()
+        self._left_panel.setLayout(left_layout)
+        self._left_panel.setFixedWidth(230)
+
+        # Tira fina para volver a expandir el panel izquierdo.
+        self._left_expand = QPushButton("▶")
+        self._left_expand.setFixedWidth(22)
+        self._left_expand.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
+        )
+        self._left_expand.setToolTip("Expand images panel")
+        self._left_expand.clicked.connect(lambda: self._toggle_left(True))
+        self._left_expand.hide()
 
         # --- Centro: dos visores lado a lado (Vertical y Termal) ---
         self._view_v = ImageView(lambda px, py: self._add_point(self._view_v, px, py))
@@ -866,9 +890,23 @@ class MainWindow(QMainWindow):
         self._t_box = QWidget()
         self._t_box.setLayout(t_layout)
 
-        center_layout = QHBoxLayout()
-        center_layout.addWidget(v_box, stretch=1)
-        center_layout.addWidget(self._t_box, stretch=1)
+        images_layout = QHBoxLayout()
+        images_layout.setContentsMargins(0, 0, 0, 0)
+        images_layout.addWidget(v_box, stretch=1)
+        images_layout.addWidget(self._t_box, stretch=1)
+        images_row = QWidget()
+        images_row.setLayout(images_layout)
+
+        # Botón "Mark as processed" en el bloque central, abajo y sin ocupar
+        # todo el ancho.
+        processed_row = QHBoxLayout()
+        processed_row.addStretch()
+        processed_row.addWidget(self._processed_btn)
+        processed_row.addStretch()
+
+        center_layout = QVBoxLayout()
+        center_layout.addWidget(images_row, stretch=1)
+        center_layout.addLayout(processed_row)
         center_panel = QWidget()
         center_panel.setLayout(center_layout)
 
@@ -889,32 +927,80 @@ class MainWindow(QMainWindow):
         self._delete_btn.clicked.connect(self._delete_selected)
         self._delete_btn.setEnabled(False)
 
-        export_btn = QPushButton("Export")
-        export_btn.clicked.connect(self._export)
+        # Estado de "fichero de export existente cargado".
+        self._loaded_export_path: str | None = None
+        self._loaded_export_df = None  # filas ya existentes en el fichero
+
+        self._load_export_btn = QPushButton("Load Existing Export File")
+        self._load_export_btn.clicked.connect(self._load_existing_export)
+
+        self._export_btn = QPushButton("Export")
+        self._export_btn.clicked.connect(self._export)
+
+        self._save_loaded_btn = QPushButton("Save to the loaded file")
+        self._save_loaded_btn.clicked.connect(self._save_to_loaded)
+        self._save_loaded_btn.hide()
+
+        export_row = QHBoxLayout()
+        export_row.addWidget(self._load_export_btn)
+        export_row.addWidget(self._export_btn)
+        export_row.addWidget(self._save_loaded_btn)
 
         self._geo_status = QLabel("No image loaded")
         self._geo_status.setWordWrap(True)
         self._geo_status.setStyleSheet("color: #666; font-size: 11px;")
 
+        right_header = QHBoxLayout()
+        right_collapse = QPushButton("▶")
+        right_collapse.setFixedWidth(28)
+        right_collapse.setToolTip("Collapse panel")
+        right_collapse.clicked.connect(lambda: self._toggle_right(False))
+        right_header.addWidget(right_collapse)
+        right_header.addWidget(QLabel("Records"))
+        right_header.addStretch()
+
         right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel("Records"))
+        right_layout.addLayout(right_header)
         right_layout.addWidget(self._geo_status)
-        right_layout.addWidget(self._table)
+        right_layout.addWidget(self._table, stretch=1)
         right_layout.addWidget(self._delete_btn)
-        right_layout.addWidget(export_btn)
-        right_panel = QWidget()
-        right_panel.setLayout(right_layout)
-        right_panel.setFixedWidth(440)
+        right_layout.addLayout(export_row)
+        self._right_panel = QWidget()
+        self._right_panel.setLayout(right_layout)
+        self._right_panel.setFixedWidth(440)
+
+        # Tira fina para volver a expandir el panel derecho.
+        self._right_expand = QPushButton("◀")
+        self._right_expand.setFixedWidth(22)
+        self._right_expand.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
+        )
+        self._right_expand.setToolTip("Expand records panel")
+        self._right_expand.clicked.connect(lambda: self._toggle_right(True))
+        self._right_expand.hide()
 
         # --- Composición principal ---
         layout = QHBoxLayout()
-        layout.addWidget(left_panel)
+        layout.addWidget(self._left_expand)
+        layout.addWidget(self._left_panel)
         layout.addWidget(center_panel, stretch=1)
-        layout.addWidget(right_panel)
+        layout.addWidget(self._right_panel)
+        layout.addWidget(self._right_expand)
 
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+
+    # ------------------------------------------------------------------ #
+    # Colapsar / expandir paneles laterales
+    # ------------------------------------------------------------------ #
+    def _toggle_left(self, expand: bool) -> None:
+        self._left_panel.setVisible(expand)
+        self._left_expand.setVisible(not expand)
+
+    def _toggle_right(self, expand: bool) -> None:
+        self._right_panel.setVisible(expand)
+        self._right_expand.setVisible(not expand)
 
     # ------------------------------------------------------------------ #
     # Carga de imágenes
@@ -1065,14 +1151,13 @@ class MainWindow(QMainWindow):
         return item
 
     def _style_scene_item(self, item: QListWidgetItem, scene: _Scene) -> None:
-        """Aplica texto y color al item según estado (ok / procesada)."""
+        """Aplica texto, color y fondo al item según estado (ok / procesada)."""
         mark = "✓" if scene.ok else "✗"
         pair = " · V+T" if scene.right_path else ""
-        done = "  ✅ processed" if scene.processed else ""
-        item.setText(f"{mark} {scene.label}{pair}{done}")
-        if scene.processed:
-            item.setForeground(QColor(30, 130, 30))
-        elif not scene.ok:
+        item.setText(f"{mark} {scene.label}{pair}")
+        # Procesada: fondo verde (sin texto extra). Si no, fondo normal.
+        item.setBackground(QColor(200, 235, 200) if scene.processed else QColor(0, 0, 0, 0))
+        if not scene.ok:
             item.setForeground(QColor(200, 40, 40))
         else:
             item.setForeground(QColor(0, 0, 0))
@@ -1241,6 +1326,33 @@ class MainWindow(QMainWindow):
         self._records = [p for p in self._records if p.id != point_id]
         self._refresh()
 
+    def _records_dataframe(self) -> "pd.DataFrame":
+        """DataFrame de los records de la tabla, con las columnas de export."""
+        return pd.DataFrame(
+            [
+                {
+                    "id": p.id,
+                    "image": Path(p.image_v).name,
+                    "latitude": p.wy,
+                    "longitude": p.wx,
+                    "status": p.status,
+                    "specie": p.specie,
+                    "review_later": p.review_later,
+                    "notes": p.notes,
+                }
+                for p in self._records
+            ],
+            columns=EXPORT_COLUMNS,
+        )
+
+    @staticmethod
+    def _write_dataframe(frame: "pd.DataFrame", path: str) -> None:
+        """Escribe el DataFrame a CSV o XLSX según la extensión de ``path``."""
+        if path.lower().endswith(".xlsx"):
+            frame.to_excel(path, index=False)
+        else:
+            frame.to_csv(path, index=False)
+
     def _export(self) -> None:
         if not self._records:
             QMessageBox.warning(
@@ -1260,26 +1372,8 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(suffix):
             path += suffix
 
-        frame = pd.DataFrame(
-            [
-                {
-                    "id": p.id,
-                    "image": Path(p.image_v).name,
-                    "latitude": p.wy,
-                    "longitude": p.wx,
-                    "status": p.status,
-                    "specie": p.specie,
-                    "review_later": p.review_later,
-                    "notes": p.notes,
-                }
-                for p in self._records
-            ]
-        )
         try:
-            if want_excel:
-                frame.to_excel(path, index=False)
-            else:
-                frame.to_csv(path, index=False)
+            self._write_dataframe(self._records_dataframe(), path)
         except (OSError, ValueError) as exc:
             log_error(f"{path} — error while exporting: {exc}")
             QMessageBox.critical(
@@ -1289,6 +1383,83 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Exported",
             f"Exported {len(self._records)} records to {Path(path).name}.",
+        )
+
+    def _load_existing_export(self) -> None:
+        """Carga un fichero de export existente para continuar añadiendo records.
+
+        La tabla queda vacía, pero al guardar los nuevos records se añadirán
+        DESPUÉS de la última fila del fichero cargado. El botón Export pasa a
+        ser «Save to the loaded file».
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load existing export file", "",
+            "Export files (*.csv *.xlsx)",
+        )
+        if not path:
+            return
+        try:
+            existing = (
+                pd.read_excel(path) if path.lower().endswith(".xlsx")
+                else pd.read_csv(path)
+            )
+        except (OSError, ValueError) as exc:
+            log_error(f"{path} — error while loading export: {exc}")
+            QMessageBox.critical(self, "Error", f"Could not read the file:\n{exc}")
+            return
+
+        # Validar que el fichero tiene exactamente las columnas de export.
+        if list(existing.columns) != EXPORT_COLUMNS:
+            QMessageBox.critical(
+                self, "Invalid file",
+                "The file must have the same columns as an export:\n"
+                + ", ".join(EXPORT_COLUMNS),
+            )
+            return
+
+        self._loaded_export_path = path
+        self._loaded_export_df = existing
+        # La tabla queda vacía; los nuevos records continúan tras el último id.
+        self._records = []
+        try:
+            self._next_id = int(existing["id"].max()) + 1 if len(existing) else 1
+        except (ValueError, TypeError):
+            self._next_id = len(existing) + 1
+        self._refresh()
+
+        # Export -> Save to the loaded file.
+        self._export_btn.hide()
+        self._save_loaded_btn.show()
+        self._geo_status.setText(
+            f"Loaded export file: {Path(path).name} "
+            f"({len(existing)} existing records). New records will be appended."
+        )
+
+    def _save_to_loaded(self) -> None:
+        """Guarda los records de la tabla tras la última fila del fichero cargado."""
+        if self._loaded_export_path is None:
+            return
+        if not self._records:
+            QMessageBox.warning(
+                self, "No data", "There are no new records to save."
+            )
+            return
+        combined = pd.concat(
+            [self._loaded_export_df, self._records_dataframe()], ignore_index=True
+        )
+        try:
+            self._write_dataframe(combined, self._loaded_export_path)
+        except (OSError, ValueError) as exc:
+            log_error(f"{self._loaded_export_path} — error while saving: {exc}")
+            QMessageBox.critical(
+                self, "Error", f"Could not save the file:\n{exc}"
+            )
+            return
+        QMessageBox.information(
+            self, "Saved",
+            f"Saved {len(self._records)} new records to "
+            f"{Path(self._loaded_export_path).name} "
+            f"(after {len(self._loaded_export_df)} existing rows).",
         )
 
     # ------------------------------------------------------------------ #
