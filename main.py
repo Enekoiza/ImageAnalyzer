@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from drone import build_drone_fix, lonlat_to_pixel, pixel_to_lonlat, same_zone
 from PyQt6.QtCore import QObject, QPointF, QSize, Qt, QThread, pyqtSignal
@@ -49,11 +49,30 @@ from PyQt6.QtWidgets import (
 IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.tif *.tiff)"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 
-# Columnas (y orden) de los ficheros de exportación.
-EXPORT_COLUMNS = [
+# Columnas base de los ficheros de exportación (coordenadas del mundo real).
+CORE_EXPORT_COLUMNS = [
     "id", "image", "latitude", "longitude",
     "status", "specie", "review_later", "notes",
 ]
+# Columnas de coordenadas de imagen (X/Y en píxeles respecto a la imagen V),
+# añadidas por FileDoctor y por las nuevas exportaciones.
+PIXEL_COLUMNS = ["pixel_x", "pixel_y"]
+# Columnas (y orden) completas de un fichero de exportación reparado.
+EXPORT_COLUMNS = CORE_EXPORT_COLUMNS + PIXEL_COLUMNS
+
+
+def _load_font(size: int) -> "ImageFont.FreeTypeFont | ImageFont.ImageFont":
+    """Carga una fuente TrueType del tamaño pedido; cae a la por defecto.
+
+    Intenta varias fuentes habituales en Windows/macOS/Linux. Si ninguna está
+    disponible, usa la fuente bitmap por defecto de Pillow (tamaño fijo).
+    """
+    for name in ("DejaVuSans-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def _app_dir() -> Path:
@@ -94,7 +113,7 @@ def log_error(message: str) -> None:
 # quede visible y rodeado por un círculo.
 POINT_RADIUS = 7           # radio del anillo
 POINT_RING_WIDTH = 2       # grosor del trazo del anillo
-POINT_RING = QColor(255, 255, 255)        # anillo blanco
+POINT_RING = QColor(255, 0, 0)            # anillo rojo del punto anotado
 POINT_RING_SELECTED = QColor(255, 0, 0)   # anillo rojo si está seleccionado
 POINT_HALO = QColor(0, 0, 0, 160)         # fino contorno oscuro para contraste
 
@@ -122,6 +141,8 @@ class Point:
     image: str = ""      # imagen sobre la que se hizo clic (para el overlay)
     image_v: str = ""    # imagen Vertical de la escena (nombre para el export)
     decimals: int = 0    # decimales con los que mostrar wx/wy en la tabla
+    pixel_x: int | None = None  # X en píxeles respecto a la imagen V (export)
+    pixel_y: int | None = None  # Y en píxeles respecto a la imagen V (export)
 
 
 def map_display_to_original(
@@ -1309,12 +1330,23 @@ class MainWindow(QMainWindow):
             return
         wx, wy = view.pixel_to_world(px, py)
         _xl, _yl, _cx, _cy, decimals = view.coordinate_meta()
+        # Coordenadas de imagen respecto a la V (la que figura en el export).
+        # Si el clic fue en la V coincide con (px, py); si fue en la T se
+        # reproyecta sobre la V. Si cae fuera del encuadre de la V, se deja
+        # vacío: no se inventan píxeles negativos.
+        pixel_x = pixel_y = None
+        pixel_xy = self._view_v.world_to_pixel(wx, wy)
+        if pixel_xy is not None:
+            vw, vh = self._view_v.original_size
+            if -1.0 <= pixel_xy[0] <= vw and -1.0 <= pixel_xy[1] <= vh:
+                pixel_x = max(0, min(vw - 1, int(round(pixel_xy[0]))))
+                pixel_y = max(0, min(vh - 1, int(round(pixel_xy[1]))))
         self._records.append(Point(
             self._next_id, wx, wy,
             dialog.selected_status(), dialog.selected_specie(),
             review_later=dialog.review_later(), notes=dialog.notes(),
             image=image_path, image_v=self._current_scene.left_path,
-            decimals=decimals,
+            decimals=decimals, pixel_x=pixel_x, pixel_y=pixel_y,
         ))
         self._next_id += 1
         self._refresh()
@@ -1339,6 +1371,8 @@ class MainWindow(QMainWindow):
                     "specie": p.specie,
                     "review_later": p.review_later,
                     "notes": p.notes,
+                    "pixel_x": p.pixel_x,
+                    "pixel_y": p.pixel_y,
                 }
                 for p in self._records
             ],
@@ -1353,36 +1387,104 @@ class MainWindow(QMainWindow):
         else:
             frame.to_csv(path, index=False)
 
+    @staticmethod
+    def _draw_points_on_image(
+        img_path: str, points: list[Point], photos_dir: Path
+    ) -> None:
+        """Guarda en ``photos_dir`` una copia de la imagen con sus puntos en rojo.
+
+        Junto a cada círculo se escribe el ``id`` del record (el mismo que
+        figura en el CSV) para poder identificarlo visualmente.
+        """
+        with Image.open(img_path) as img:
+            canvas = img.convert("RGB")
+        draw = ImageDraw.Draw(canvas)
+        # Radio/grosor proporcionales al tamaño para que se vea en fotos grandes.
+        radius = max(8, round(min(canvas.size) * 0.006))
+        width = max(2, round(radius / 3))
+        # Fuente para el id, escalada al tamaño de la imagen.
+        font = _load_font(max(14, round(min(canvas.size) * 0.014)))
+        for p in points:
+            if p.pixel_x is None or p.pixel_y is None:
+                continue
+            x, y = int(p.pixel_x), int(p.pixel_y)
+            draw.ellipse(
+                [x - radius, y - radius, x + radius, y + radius],
+                outline=(255, 0, 0), width=width,
+            )
+            # Id pegado al círculo, arriba a la derecha.
+            draw.text(
+                (x + radius + 2, y - radius - 2), str(p.id),
+                fill=(255, 0, 0), font=font, anchor="lb",
+            )
+        canvas.save(photos_dir / Path(img_path).name)
+
+    def _render_annotated_photos(self, photos_dir: Path) -> int:
+        """Escribe en ``photos_dir`` cada imagen V anotada con sus puntos en rojo.
+
+        Agrupa los records por su imagen V (la que figura en el CSV) y dibuja un
+        círculo rojo en cada (pixel_x, pixel_y). Devuelve cuántas fotos se han
+        escrito. Se omiten los records sin coordenadas de imagen o cuya imagen
+        ya no esté en disco.
+        """
+        by_image: dict[str, list[Point]] = {}
+        for p in self._records:
+            if p.image_v:
+                by_image.setdefault(p.image_v, []).append(p)
+
+        photos_dir.mkdir(parents=True, exist_ok=True)
+        saved = 0
+        for img_path, points in by_image.items():
+            if not Path(img_path).exists():
+                log_error(f"{img_path} — photo not found, skipped in export")
+                continue
+            try:
+                self._draw_points_on_image(img_path, points, photos_dir)
+                saved += 1
+            except Exception as exc:  # noqa: BLE001 (imagen ilegible/corrupta)
+                log_error(f"{img_path} — error rendering annotated photo: {exc}")
+        return saved
+
     def _export(self) -> None:
+        """Exporta el resultado a una carpeta: ``records.csv`` + ``photos/``.
+
+        La carpeta de salida contiene el CSV con los records (incluyendo las
+        coordenadas de imagen ``pixel_x``/``pixel_y``) y una subcarpeta
+        ``photos`` con cada imagen V anotada y sus puntos dibujados en rojo.
+        """
         if not self._records:
             QMessageBox.warning(
                 self, "No data", "There are no records to export."
             )
             return
-        path, selected_filter = QFileDialog.getSaveFileName(
-            self, "Export records", "records.csv",
-            "CSV (*.csv);;Excel (*.xlsx)",
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export results (choose a folder name)", "results",
         )
         if not path:
             return
 
-        # Determinar el formato por el filtro elegido o la extensión.
-        want_excel = "xlsx" in selected_filter.lower() or path.lower().endswith(".xlsx")
-        suffix = ".xlsx" if want_excel else ".csv"
-        if not path.lower().endswith(suffix):
-            path += suffix
+        # El usuario elige el nombre/ubicación de la carpeta de resultados.
+        out_dir = Path(path)
+        if out_dir.suffix:
+            out_dir = out_dir.with_suffix("")
+        csv_path = out_dir / "records.csv"
+        photos_dir = out_dir / "photos"
 
         try:
-            self._write_dataframe(self._records_dataframe(), path)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            self._write_dataframe(self._records_dataframe(), str(csv_path))
+            photos = self._render_annotated_photos(photos_dir)
         except (OSError, ValueError) as exc:
-            log_error(f"{path} — error while exporting: {exc}")
+            log_error(f"{out_dir} — error while exporting: {exc}")
             QMessageBox.critical(
-                self, "Error", f"Could not save the file:\n{exc}"
+                self, "Error", f"Could not save the results:\n{exc}"
             )
             return
         QMessageBox.information(
             self, "Exported",
-            f"Exported {len(self._records)} records to {Path(path).name}.",
+            f"Exported {len(self._records)} records to {out_dir.name}/"
+            f"records.csv and {photos} annotated photo(s) to "
+            f"{out_dir.name}/photos.",
         )
 
     def _load_existing_export(self) -> None:
@@ -1408,15 +1510,20 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not read the file:\n{exc}")
             return
 
-        # Validar que el fichero tiene exactamente las columnas de export.
-        if list(existing.columns) != EXPORT_COLUMNS:
+        # Validar las columnas: se acepta tanto el formato completo (con
+        # pixel_x/pixel_y) como el antiguo (solo coordenadas del mundo real).
+        cols = list(existing.columns)
+        if cols not in (EXPORT_COLUMNS, CORE_EXPORT_COLUMNS):
             QMessageBox.critical(
                 self, "Invalid file",
                 "The file must have the same columns as an export:\n"
-                + ", ".join(EXPORT_COLUMNS),
+                + ", ".join(CORE_EXPORT_COLUMNS)
+                + "\n(optionally followed by: " + ", ".join(PIXEL_COLUMNS) + ")",
             )
             return
 
+        # Normalizar al formato completo (añade pixel_x/pixel_y vacías si faltan).
+        existing = existing.reindex(columns=EXPORT_COLUMNS)
         self._loaded_export_path = path
         self._loaded_export_df = existing
         # La tabla queda vacía; los nuevos records continúan tras el último id.
@@ -1447,8 +1554,11 @@ class MainWindow(QMainWindow):
         combined = pd.concat(
             [self._loaded_export_df, self._records_dataframe()], ignore_index=True
         )
+        # Las fotos anotadas se guardan en un subdirectorio junto al CSV cargado.
+        photos_dir = Path(self._loaded_export_path).parent / "photos"
         try:
             self._write_dataframe(combined, self._loaded_export_path)
+            photos = self._render_annotated_photos(photos_dir)
         except (OSError, ValueError) as exc:
             log_error(f"{self._loaded_export_path} — error while saving: {exc}")
             QMessageBox.critical(
@@ -1459,7 +1569,8 @@ class MainWindow(QMainWindow):
             self, "Saved",
             f"Saved {len(self._records)} new records to "
             f"{Path(self._loaded_export_path).name} "
-            f"(after {len(self._loaded_export_df)} existing rows).",
+            f"(after {len(self._loaded_export_df)} existing rows) and "
+            f"{photos} annotated photo(s) to photos/.",
         )
 
     # ------------------------------------------------------------------ #
