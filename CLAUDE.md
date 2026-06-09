@@ -8,16 +8,17 @@ no .NET/React (ignora el stack del CLAUDE.md global para este repo).
 **ImageAnalyzer** — aplicación de escritorio multiplataforma (Windows/macOS)
 para **anotar puntos sobre imágenes de dron** y registrar avistamientos de
 gaviotas. Cada clic crea un *record* con coordenadas del mundo real (lat/lon),
-estado (Individual/Nest), especie (Lesser Black-Backed Gull / Herring Gull),
-flag "Review Later" y notas. Los records se exportan a CSV/XLSX.
+coordenadas de imagen (pixel_x/pixel_y), estado (Individual/Nest), especie
+(Lesser Black-Backed Gull / Herring Gull), flag "Review Later" y notas. El
+resultado se exporta a una **carpeta** con el CSV y las fotos anotadas.
 
 ## Stack
 
 | Capa | Tecnología |
 |------|------------|
 | GUI | PyQt6 |
-| Imágenes / EXIF / XMP | Pillow |
-| Exportación | pandas + openpyxl (CSV/XLSX) |
+| Imágenes / EXIF / XMP / dibujo | Pillow (`ImageDraw`/`ImageFont`) |
+| Exportación | pandas + openpyxl (CSV/XLSX) + fotos anotadas |
 | Empaquetado | PyInstaller |
 
 Dependencias en `requirements.txt`. Entorno en `.venv/`.
@@ -52,10 +53,22 @@ requirements.txt
 - **Verificación de metadatos**: al cargar carpeta, `verify_image` valida en un
   hilo de fondo (`_VerifyWorker`) con barra de progreso; las no procesables se
   registran en `ErrorLogs.txt` (`log_error`) y se listan en un diálogo.
-- **Export**: columnas `EXPORT_COLUMNS = [id, image, latitude, longitude,
-  status, specie, review_later, notes]`. "Load Existing Export File" carga un
-  fichero con esas columnas; "Save to the loaded file" reescribe = filas
-  existentes + records actuales (idempotente, sin duplicar).
+- **Coordenadas de imagen** (`Point.pixel_x` / `pixel_y`): X/Y en píxeles
+  respecto a la imagen V, calculadas al hacer clic (`world_to_pixel` sobre la
+  V). Si el punto cae fuera del encuadre de la V se dejan vacías (no se
+  inventan píxeles negativos).
+- **Export = carpeta** (no un único CSV). `_export` pide un nombre de carpeta y
+  genera dentro: `records.csv` + subcarpeta `photos/` con cada imagen V anotada
+  (círculo rojo + el `id` del record dibujados en cada punto,
+  `_draw_points_on_image` / `_render_annotated_photos`). Columnas del CSV:
+  `EXPORT_COLUMNS = CORE_EXPORT_COLUMNS + PIXEL_COLUMNS` =
+  `[id, image, latitude, longitude, status, specie, review_later, notes,
+  pixel_x, pixel_y]`.
+- **Load / Save existing**: "Load Existing Export File" acepta ficheros con las
+  columnas completas **o** las antiguas sin `pixel_x/pixel_y` (las normaliza con
+  `reindex`). "Save to the loaded file" reescribe = filas existentes + records
+  actuales (idempotente) y vuelca también las fotos anotadas en `photos/` junto
+  al CSV cargado.
 
 ## Componentes UI (main.py / MainWindow)
 
@@ -65,7 +78,8 @@ requirements.txt
 - **Centro**: `ImageView` Vertical + Thermal lado a lado. Zoom con rueda
   (hacia el cursor), pan con botón derecho/central, doble clic = ajustar.
 - **Derecha**: tabla de records (colapsable) + Delete / Load Existing Export /
-  Export ↔ Save to the loaded file.
+  Export ↔ Save to the loaded file. La tabla NO muestra pixel_x/pixel_y (solo
+  van al CSV). Los puntos del overlay se dibujan en **rojo** (`POINT_RING`).
 - `AnnotationDialog`: recorte ampliado del clic + Status + Specie + Review
   Later + Notes; el record solo se crea al pulsar Save.
 
