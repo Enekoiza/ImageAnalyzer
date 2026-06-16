@@ -26,10 +26,16 @@ jobs:
             icon: assets/logo.ico
             add_data: "assets/logo.png;assets"
             artifact: ImageAnalyzer-Windows
+            # Windows: un único .exe es lo deseable.
+            mode: --onefile
           - os: macos-latest
             icon: assets/logo.icns
             add_data: "assets/logo.png:assets"
             artifact: ImageAnalyzer-macOS
+            # macOS: --onedir (NO --onefile). Con --onefile el .app es un
+            # lanzador que descomprime y arranca un segundo proceso, lo que
+            # provoca DOS iconos en el Dock y la sensación de "abrir 2 veces".
+            mode: --onedir
 
     steps:
       - name: Checkout
@@ -47,7 +53,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: >
-          pyinstaller --noconfirm --windowed --onefile
+          pyinstaller --noconfirm --windowed ${{ matrix.mode }}
           --name ImageAnalyzer
           --icon ${{ matrix.icon }}
           --add-data "${{ matrix.add_data }}"

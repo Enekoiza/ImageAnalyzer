@@ -26,8 +26,13 @@ echo "==> Instalando dependencias…"
 pip install --upgrade pip >/dev/null
 pip install -r requirements.txt >/dev/null
 
+# NOTA: en macOS se usa --onedir (NO --onefile). Con --onefile el ejecutable
+# es un lanzador que descomprime a una carpeta temporal y arranca un segundo
+# proceso: eso provoca DOS iconos en el Dock y la sensación de "abrir dos veces".
+# El .app ya es un paquete, así que --onedir es lo correcto y además arranca más
+# rápido (no extrae nada en cada ejecución).
 echo "==> Compilando con PyInstaller…"
-pyinstaller --noconfirm --windowed --onefile --name ImageAnalyzer \
+pyinstaller --noconfirm --windowed --onedir --name ImageAnalyzer \
   --icon assets/logo.icns \
   --add-data "assets/logo.png:assets" \
   main.py
