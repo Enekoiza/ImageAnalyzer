@@ -18,7 +18,7 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 from drone import build_drone_fix, lonlat_to_pixel, pixel_to_lonlat, same_zone
-from PyQt6.QtCore import QObject, QPointF, QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QPointF, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -952,6 +952,30 @@ class MainWindow(QMainWindow):
         self._loaded_export_path: str | None = None
         self._loaded_export_df = None  # filas ya existentes en el fichero
 
+        # Autoguardado: tras el primer guardado a un destino elegido por el
+        # usuario (Export a carpeta o Save to loaded), un temporizador reescribe
+        # ese destino cada 10 s SOLO si hay cambios pendientes (``_dirty``).
+        self._export_dir: Path | None = None  # carpeta del último Export
+        self._dirty = False  # hay records sin guardar desde el último guardado
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(10_000)
+        self._autosave_timer.timeout.connect(self._autosave)
+
+        # Spinner animado para el indicador: gira mientras hay cambios pendientes
+        # de guardar y se sustituye por un tick verde cuando todo está guardado.
+        self._spin_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self._spin_idx = 0
+        self._spin_timer = QTimer(self)
+        self._spin_timer.setInterval(120)
+        self._spin_timer.timeout.connect(self._tick_spinner)
+
+        # Barra superior de autoguardado: un indicador de estado y, mientras no
+        # exista un destino donde guardar, un botón para elegirlo y arrancarlo.
+        self._start_autosave_btn = QPushButton("Iniciar Autoguardado")
+        self._start_autosave_btn.clicked.connect(self._start_autosave)
+        self._autosave_status = QLabel()
+        self._autosave_status.setStyleSheet("font-size: 12px; color: #444;")
+
         self._load_export_btn = QPushButton("Load Existing Export File")
         self._load_export_btn.clicked.connect(self._load_existing_export)
 
@@ -1001,16 +1025,28 @@ class MainWindow(QMainWindow):
         self._right_expand.hide()
 
         # --- Composición principal ---
-        layout = QHBoxLayout()
-        layout.addWidget(self._left_expand)
-        layout.addWidget(self._left_panel)
-        layout.addWidget(center_panel, stretch=1)
-        layout.addWidget(self._right_panel)
-        layout.addWidget(self._right_expand)
+        main_row = QHBoxLayout()
+        main_row.addWidget(self._left_expand)
+        main_row.addWidget(self._left_panel)
+        main_row.addWidget(center_panel, stretch=1)
+        main_row.addWidget(self._right_panel)
+        main_row.addWidget(self._right_expand)
+
+        # Barra superior con el estado/botón de autoguardado.
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(self._autosave_status)
+        top_bar.addStretch()
+        top_bar.addWidget(self._start_autosave_btn)
+
+        outer = QVBoxLayout()
+        outer.addLayout(top_bar)
+        outer.addLayout(main_row, stretch=1)
 
         container = QWidget()
-        container.setLayout(layout)
+        container.setLayout(outer)
         self.setCentralWidget(container)
+
+        self._update_autosave_ui()
 
     # ------------------------------------------------------------------ #
     # Colapsar / expandir paneles laterales
@@ -1349,6 +1385,7 @@ class MainWindow(QMainWindow):
             decimals=decimals, pixel_x=pixel_x, pixel_y=pixel_y,
         ))
         self._next_id += 1
+        self._dirty = True
         self._refresh()
 
     def _delete_selected(self) -> None:
@@ -1356,6 +1393,7 @@ class MainWindow(QMainWindow):
         if point_id is None:
             return
         self._records = [p for p in self._records if p.id != point_id]
+        self._dirty = True
         self._refresh()
 
     def _records_dataframe(self) -> "pd.DataFrame":
@@ -1446,34 +1484,26 @@ class MainWindow(QMainWindow):
         return saved
 
     def _export(self) -> None:
-        """Exporta el resultado a una carpeta: ``records.csv`` + ``photos/``.
+        """Botón inferior: la primera vez exporta a una carpeta elegida; después
+        actúa como «Save» reescribiendo esa misma carpeta.
 
-        La carpeta de salida contiene el CSV con los records (incluyendo las
-        coordenadas de imagen ``pixel_x``/``pixel_y``) y una subcarpeta
-        ``photos`` con cada imagen V anotada y sus puntos dibujados en rojo.
+        Al elegir la carpeta por primera vez se activa el autoguardado a ese
+        destino y el botón pasa a llamarse «Save».
         """
+        # Si ya hay carpeta de autoguardado, este botón guarda en ella (Save).
+        if self._export_dir is not None:
+            self._save_to_export_dir()
+            return
         if not self._records:
             QMessageBox.warning(
                 self, "No data", "There are no records to export."
             )
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export results (choose a folder name)", "results",
-        )
-        if not path:
+        out_dir = self._pick_export_dir()
+        if out_dir is None:
             return
-
-        # El usuario elige el nombre/ubicación de la carpeta de resultados.
-        out_dir = Path(path)
-        if out_dir.suffix:
-            out_dir = out_dir.with_suffix("")
-        csv_path = out_dir / "records.csv"
-        photos_dir = out_dir / "photos"
-
         try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-            self._write_dataframe(self._records_dataframe(), str(csv_path))
-            photos = self._render_annotated_photos(photos_dir)
+            photos = self._begin_export(out_dir)
         except (OSError, ValueError) as exc:
             log_error(f"{out_dir} — error while exporting: {exc}")
             QMessageBox.critical(
@@ -1482,10 +1512,142 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(
             self, "Exported",
-            f"Exported {len(self._records)} records to {out_dir.name}/"
-            f"records.csv and {photos} annotated photo(s) to "
-            f"{out_dir.name}/photos.",
+            f"Exported {len(self._records)} records and {photos} annotated "
+            f"photo(s) to:\n\n{out_dir.resolve()}\n\n"
+            f"Autosave is now active (every 10 s) and this button is now «Save».",
         )
+
+    def _save_to_export_dir(self) -> None:
+        """Reescribe manualmente la carpeta de autoguardado (acción «Save»)."""
+        if self._export_dir is None:
+            return
+        try:
+            photos = self._write_export(self._export_dir)
+        except (OSError, ValueError) as exc:
+            log_error(f"{self._export_dir} — error while saving: {exc}")
+            QMessageBox.critical(
+                self, "Error", f"Could not save the results:\n{exc}"
+            )
+            return
+        self._dirty = False
+        self._refresh_autosave_status()
+        QMessageBox.information(
+            self, "Saved",
+            f"Saved {len(self._records)} records and {photos} annotated "
+            f"photo(s) to {self._export_dir.name}/.",
+        )
+
+    def _write_export(self, out_dir: Path) -> int:
+        """Escribe la carpeta de resultados (CSV + fotos). Devuelve nº de fotos."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._write_dataframe(
+            self._records_dataframe(), str(out_dir / "records.csv")
+        )
+        return self._render_annotated_photos(out_dir / "photos")
+
+    def _pick_export_dir(self) -> "Path | None":
+        """Pide al usuario el nombre/ubicación de la carpeta de resultados."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Choose results folder (name and location)", "results",
+        )
+        if not path:
+            return None
+        out_dir = Path(path)
+        if out_dir.suffix:
+            out_dir = out_dir.with_suffix("")
+        return out_dir
+
+    def _begin_export(self, out_dir: Path) -> int:
+        """Escribe la carpeta y activa el autoguardado hacia ella.
+
+        Deja el botón inferior como «Save» y refresca la barra superior.
+        Devuelve el número de fotos escritas.
+        """
+        photos = self._write_export(out_dir)
+        self._export_dir = out_dir
+        self._loaded_export_path = None
+        self._dirty = False
+        self._autosave_timer.start()
+        self._export_btn.setText("Save")
+        self._update_autosave_ui()
+        return photos
+
+    def _start_autosave(self) -> None:
+        """Botón superior: elige libremente la carpeta destino y arranca el
+        autoguardado hacia ella.
+        """
+        out_dir = self._pick_export_dir()
+        if out_dir is None:
+            return
+        try:
+            photos = self._begin_export(out_dir)
+        except (OSError, ValueError) as exc:
+            log_error(f"{out_dir} — error while starting autosave: {exc}")
+            QMessageBox.critical(
+                self, "Error", f"Could not start autosave:\n{exc}"
+            )
+            return
+        # Confirmar la RUTA ABSOLUTA para que el usuario sepa dónde mirar.
+        QMessageBox.information(
+            self, "Autosave started",
+            f"Results will be autosaved every 10 s to:\n\n{out_dir.resolve()}\n\n"
+            f"Inside you'll find records.csv and a photos/ folder ({photos} "
+            f"photo(s) so far; photos appear only for points that fall inside "
+            f"the Vertical image).",
+        )
+
+    def _has_save_target(self) -> bool:
+        """¿Hay ya un destino (carpeta de export o fichero cargado) donde guardar?"""
+        return self._loaded_export_path is not None or self._export_dir is not None
+
+    def _update_autosave_ui(self) -> None:
+        """Refresca la barra superior: indicador de estado y botón de arranque.
+
+        Mientras no exista un destino donde guardar, se muestra el botón
+        «Iniciar Autoguardado». En cuanto hay destino, el botón desaparece, el
+        spinner empieza a girar y el indicador muestra el estado de guardado.
+        """
+        if self._has_save_target():
+            self._start_autosave_btn.hide()
+            if not self._spin_timer.isActive():
+                self._spin_timer.start()
+        else:
+            self._start_autosave_btn.show()
+            self._spin_timer.stop()
+        self._refresh_autosave_status()
+
+    def _autosave_target_name(self) -> str:
+        """Nombre legible del destino actual de guardado."""
+        if self._loaded_export_path is not None:
+            return Path(self._loaded_export_path).name
+        if self._export_dir is not None:
+            return f"{self._export_dir.name}/"
+        return ""
+
+    def _refresh_autosave_status(self) -> None:
+        """Pinta el indicador según el estado: inactivo / guardando / guardado."""
+        if not self._has_save_target():
+            self._autosave_status.setText(
+                "○ Autoguardado inactivo (sin carpeta de guardado)"
+            )
+            self._autosave_status.setStyleSheet("font-size: 12px; color: #888;")
+            return
+        target = self._autosave_target_name()
+        if self._dirty:
+            # Cambios pendientes: spinner girando "a la espera" del guardado.
+            frame = self._spin_frames[self._spin_idx % len(self._spin_frames)]
+            self._autosave_status.setText(f"{frame} Guardando… → {target}")
+            self._autosave_status.setStyleSheet("font-size: 12px; color: #b26a00;")
+        else:
+            # Todo guardado: tick verde.
+            self._autosave_status.setText(f"✓ Guardado → {target}")
+            self._autosave_status.setStyleSheet("font-size: 12px; color: #2e7d32;")
+
+    def _tick_spinner(self) -> None:
+        """Avanza un fotograma del spinner (solo si hay cambios pendientes)."""
+        if self._dirty:
+            self._spin_idx += 1
+        self._refresh_autosave_status()
 
     def _load_existing_export(self) -> None:
         """Carga un fichero de export existente para continuar añadiendo records.
@@ -1534,6 +1696,12 @@ class MainWindow(QMainWindow):
             self._next_id = len(existing) + 1
         self._refresh()
 
+        # El fichero cargado es ya un destino válido: arranca el autoguardado.
+        self._export_dir = None
+        self._dirty = False
+        self._autosave_timer.start()
+        self._update_autosave_ui()
+
         # Export -> Save to the loaded file.
         self._export_btn.hide()
         self._save_loaded_btn.show()
@@ -1551,27 +1719,57 @@ class MainWindow(QMainWindow):
                 self, "No data", "There are no new records to save."
             )
             return
-        combined = pd.concat(
-            [self._loaded_export_df, self._records_dataframe()], ignore_index=True
-        )
-        # Las fotos anotadas se guardan en un subdirectorio junto al CSV cargado.
-        photos_dir = Path(self._loaded_export_path).parent / "photos"
         try:
-            self._write_dataframe(combined, self._loaded_export_path)
-            photos = self._render_annotated_photos(photos_dir)
+            photos = self._write_loaded()
         except (OSError, ValueError) as exc:
             log_error(f"{self._loaded_export_path} — error while saving: {exc}")
             QMessageBox.critical(
                 self, "Error", f"Could not save the file:\n{exc}"
             )
             return
+        # A partir de ahora el autoguardado reescribe el fichero cada 10 s.
+        self._dirty = False
+        self._autosave_timer.start()
+        self._update_autosave_ui()
         QMessageBox.information(
             self, "Saved",
             f"Saved {len(self._records)} new records to "
             f"{Path(self._loaded_export_path).name} "
             f"(after {len(self._loaded_export_df)} existing rows) and "
-            f"{photos} annotated photo(s) to photos/.",
+            f"{photos} annotated photo(s) to photos/.\n"
+            f"Changes will autosave every 10 s.",
         )
+
+    def _write_loaded(self) -> int:
+        """Reescribe el fichero cargado (existentes + records). Devuelve nº fotos."""
+        combined = pd.concat(
+            [self._loaded_export_df, self._records_dataframe()], ignore_index=True
+        )
+        # Las fotos anotadas se guardan en un subdirectorio junto al CSV cargado.
+        photos_dir = Path(self._loaded_export_path).parent / "photos"
+        self._write_dataframe(combined, self._loaded_export_path)
+        return self._render_annotated_photos(photos_dir)
+
+    def _autosave(self) -> None:
+        """Reescribe el destino actual cada 10 s si hay cambios pendientes.
+
+        Silencioso: no abre diálogos. Si falla, lo registra en ``ErrorLogs.txt``
+        y deja ``_dirty`` activo para reintentar en el siguiente ciclo.
+        """
+        if not self._dirty or not self._records:
+            return
+        try:
+            if self._loaded_export_path is not None:
+                self._write_loaded()
+            elif self._export_dir is not None:
+                self._write_export(self._export_dir)
+            else:
+                return
+        except (OSError, ValueError) as exc:
+            log_error(f"autosave failed: {exc}")
+            return
+        self._dirty = False
+        self._refresh_autosave_status()  # pasa a tick verde
 
     # ------------------------------------------------------------------ #
     # Estado de la interfaz
